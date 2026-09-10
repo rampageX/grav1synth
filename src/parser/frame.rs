@@ -631,15 +631,20 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         })
                         .cloned()
                     {
-                        self.write_film_grain_bits(
+                        self.write_film_grain_bits_with_trailing(
                             extra_byte,
                             extra_bits_used,
                             &new_header,
                             frame_type,
+                            !verify_byte_alignment,
                         )
                     } else {
                         // Sets "apply_grain" to false. We don't need to do anything else.
-                        self.write_film_grain_disabled_bit(extra_byte, extra_bits_used);
+                        self.write_film_grain_disabled_bit_with_trailing(
+                            extra_byte,
+                            extra_bits_used,
+                            !verify_byte_alignment,
+                        );
                         FilmGrainHeader::Disable
                     }
                 } else {
@@ -651,7 +656,12 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                         for i in 0..=start_bit {
                             extra_byte.set_bit(i, false);
                         }
+                        if !verify_byte_alignment {
+                            extra_byte.set_bit(start_bit, true);
+                        }
                         self.packet_out.push(extra_byte);
+                    } else if !verify_byte_alignment {
+                        self.packet_out.push(0x80);
                     }
                     FilmGrainHeader::Disable
                 }
@@ -708,6 +718,23 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         extra_bits_used: usize,
         new_header: &GrainTableSegment,
         frame_type: FrameType,
+    ) -> FilmGrainHeader {
+        self.write_film_grain_bits_with_trailing(
+            extra_byte,
+            extra_bits_used,
+            new_header,
+            frame_type,
+            false,
+        )
+    }
+
+    fn write_film_grain_bits_with_trailing(
+        &mut self,
+        extra_byte: u8,
+        extra_bits_used: usize,
+        new_header: &GrainTableSegment,
+        frame_type: FrameType,
+        write_trailing_bits: bool,
     ) -> FilmGrainHeader {
         let params = &new_header.grain_params;
         let mut data = bitvec::bitvec![u8, Msb0;];
@@ -812,6 +839,15 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         // clip_to_restricted_range flag (1 bit)
         data.push(params.clip_to_restricted_range);
 
+        if write_trailing_bits {
+            // Standalone OBU_FRAME_HEADER ends with trailing_bits():
+            // one trailing_one_bit followed by zero padding to byte alignment.
+            data.push(true);
+            while data.len() % 8 != 0 {
+                data.push(false);
+            }
+        }
+
         self.packet_out.extend_from_slice(data.as_raw_slice());
         trace!(
             "Film grain packet contents: {}",
@@ -823,6 +859,15 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
 
     /// Writes an `apply_grain = 0` bit while preserving partial-byte alignment.
     fn write_film_grain_disabled_bit(&mut self, extra_byte: u8, extra_bits_used: usize) {
+        self.write_film_grain_disabled_bit_with_trailing(extra_byte, extra_bits_used, false);
+    }
+
+    fn write_film_grain_disabled_bit_with_trailing(
+        &mut self,
+        extra_byte: u8,
+        extra_bits_used: usize,
+        write_trailing_bits: bool,
+    ) {
         let mut data = bitvec::bitvec![u8, Msb0;];
 
         for i in 0..extra_bits_used {
@@ -830,6 +875,13 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         }
         // Set "apply_grain" to false.
         data.push(false);
+
+        if write_trailing_bits {
+            data.push(true);
+            while data.len() % 8 != 0 {
+                data.push(false);
+            }
+        }
 
         self.packet_out.extend_from_slice(data.as_raw_slice());
     }

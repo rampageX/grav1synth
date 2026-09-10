@@ -185,7 +185,14 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                     pre_len - input.len()
                 );
                 if obu_header.has_size_field {
+                    let adjustment = obu_size - (pre_len - input.len());
                     if WRITE {
+                        // Standalone OBU_FRAME_HEADER trailing_bits() are rewritten together
+                        // with Film Grain syntax in parse_frame_header(). Do not copy the
+                        // original trailing bytes, because the rewritten header can end at a
+                        // different bit position.
+                        input = &input[adjustment..];
+
                         let bytes_written = self.packet_out.len() - packet_start_len;
                         let bytes_taken = pre_input.len() - input.len();
                         let obu_size_change = bytes_written as isize - bytes_taken as isize;
@@ -196,21 +203,41 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
                                 (obu_size as isize + obu_size_change) as usize,
                             );
                         }
+                    } else {
+                        input = &input[adjustment..];
                     }
-                    let adjustment = obu_size - (pre_len - input.len());
-                    if WRITE {
-                        self.packet_out.extend(input.iter().take(adjustment));
-                        debug!("Writing adjustment of size {}", adjustment);
-                    }
-                    input = &input[adjustment..];
                 }
 
                 Ok((input, header.map(Obu::FrameHeader)))
             }
             ObuType::TileGroup => {
-                // I'm adding an assert here explicitly because I'm not sure if the spec
-                // actually requires this. I think it does. But it's 681 pages.
-                unreachable!("This should only be called from within a frame OBU.");
+                trace_section("Tile Group");
+                debug!("Parsing standalone tile group");
+
+                if !self.seen_frame_header {
+                    return Err(nom::Err::Failure(Error::new(
+                        input,
+                        nom::error::ErrorKind::Verify,
+                    )));
+                }
+
+                let Some(ref_frame_header) = self.previous_frame_header.clone() else {
+                    return Err(nom::Err::Failure(Error::new(
+                        input,
+                        nom::error::ErrorKind::Verify,
+                    )));
+                };
+
+                let (input, ()) = context("Failed parsing standalone tile group obu", |input| {
+                    self.parse_tile_group_obu(
+                        input,
+                        obu_size,
+                        ref_frame_header.tile_info,
+                        obu_bit_offset,
+                    )
+                })
+                .parse(input)?;
+                Ok((input, None))
             }
             ObuType::TemporalDelimiter => {
                 trace_section("Temporal Delimiter");
@@ -1161,12 +1188,11 @@ mod tests {
     // ===== Group 8: parse_obu — TileGroup panic + error conditions =====
 
     #[test]
-    #[should_panic(expected = "This should only be called from within a frame OBU")]
-    fn parse_obu_tile_group_panics() {
+    fn parse_obu_tile_group_without_frame_header_returns_error() {
         let obu = build_obu_bytes(ObuType::TileGroup, None, true, &[0x00]);
         let mut parser = make_parser::<false>(0, false, None, Vec::new());
 
-        let _ = parser.parse_obu(&obu, 0);
+        assert!(parser.parse_obu(&obu, 0).is_err());
     }
 
     #[test]
