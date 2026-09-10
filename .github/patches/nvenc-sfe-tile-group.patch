@@ -1,10 +1,48 @@
 diff --git a/src/parser/obu.rs b/src/parser/obu.rs
 --- a/src/parser/obu.rs
 +++ b/src/parser/obu.rs
-@@ -210,11 +210,35 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
-
+@@ -181,22 +181,25 @@
+                 if obu_header.has_size_field {
+-                    if WRITE {
+-                        let bytes_written = self.packet_out.len() - packet_start_len;
+-                        let bytes_taken = pre_input.len() - input.len();
+-                        let obu_size_change = bytes_written as isize - bytes_taken as isize;
+-                        if obu_size_change != 0 {
+-                            self.adjust_obu_size(
+-                                obu_size_pos,
+-                                leb_size,
+-                                (obu_size as isize + obu_size_change) as usize,
+-                            );
+-                        }
+-                    }
+                     let adjustment = obu_size - (pre_len - input.len());
+                     if WRITE {
+-                        self.packet_out.extend(input.iter().take(adjustment));
+-                        debug!("Writing adjustment of size {}", adjustment);
++                        // Standalone OBU_FRAME_HEADER trailing_bits() are rewritten together
++                        // with Film Grain syntax in parse_frame_header(). Do not copy the
++                        // original trailing bytes, because the rewritten header can end at a
++                        // different bit position.
++                        input = &input[adjustment..];
++
++                        let bytes_written = self.packet_out.len() - packet_start_len;
++                        let bytes_taken = pre_input.len() - input.len();
++                        let obu_size_change = bytes_written as isize - bytes_taken as isize;
++                        if obu_size_change != 0 {
++                            self.adjust_obu_size(
++                                obu_size_pos,
++                                leb_size,
++                                (obu_size as isize + obu_size_change) as usize,
++                            );
++                        }
++                    } else {
++                        input = &input[adjustment..];
+                     }
+-                    input = &input[adjustment..];
+                 }
+ 
                  Ok((input, header.map(Obu::FrameHeader)))
-             }
+@@ -203,7 +215,31 @@
              ObuType::TileGroup => {
 -                // I'm adding an assert here explicitly because I'm not sure if the spec
 -                // actually requires this. I think it does. But it's 681 pages.
@@ -39,28 +77,26 @@ diff --git a/src/parser/obu.rs b/src/parser/obu.rs
              }
              ObuType::TemporalDelimiter => {
                  trace_section("Temporal Delimiter");
-                 debug!("Skipping temporal delimiter");
-@@ -1138,14 +1162,13 @@ mod tests {
-
+@@ -1138,12 +1174,11 @@
      // ===== Group 8: parse_obu — TileGroup panic + error conditions =====
-
+ 
      #[test]
 -    #[should_panic(expected = "This should only be called from within a frame OBU")]
 -    fn parse_obu_tile_group_panics() {
 +    fn parse_obu_tile_group_without_frame_header_returns_error() {
          let obu = build_obu_bytes(ObuType::TileGroup, None, true, &[0x00]);
          let mut parser = make_parser::<false>(0, false, None, Vec::new());
-
+ 
 -        let _ = parser.parse_obu(&obu, 0);
 +        assert!(parser.parse_obu(&obu, 0).is_err());
      }
-
+ 
      #[test]
-     fn parse_obu_rejects_empty_input() {
 diff --git a/src/parser/frame.rs b/src/parser/frame.rs
 --- a/src/parser/frame.rs
 +++ b/src/parser/frame.rs
-@@ -634,23 +634,33 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
+@@ -628,24 +628,34 @@
+                     {
 -                        self.write_film_grain_bits(
 +                        self.write_film_grain_bits_with_trailing(
                              extra_byte,
@@ -96,7 +132,7 @@ diff --git a/src/parser/frame.rs b/src/parser/frame.rs
 +                        self.packet_out.push(0x80);
                      }
                      FilmGrainHeader::Disable
-@@ -705,10 +715,27 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
+@@ -705,10 +715,27 @@
      fn write_film_grain_bits(
          &mut self,
          extra_byte: u8,
@@ -123,13 +159,13 @@ diff --git a/src/parser/frame.rs b/src/parser/frame.rs
 +    ) -> FilmGrainHeader {
          let params = &new_header.grain_params;
          let mut data = bitvec::bitvec![u8, Msb0;];
-
-@@ -810,7 +837,16 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
+ 
+@@ -810,7 +837,16 @@
          // overlap flag (1 bit)
          data.push(params.overlap_flag);
          // clip_to_restricted_range flag (1 bit)
          data.push(params.clip_to_restricted_range);
-
+ 
 +        if write_trailing_bits {
 +            // Standalone OBU_FRAME_HEADER ends with trailing_bits():
 +            // one trailing_one_bit followed by zero padding to byte alignment.
@@ -141,7 +177,7 @@ diff --git a/src/parser/frame.rs b/src/parser/frame.rs
 +
          self.packet_out.extend_from_slice(data.as_raw_slice());
          trace!(
-@@ -824,12 +860,28 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
+@@ -824,12 +860,28 @@
      /// Writes an `apply_grain = 0` bit while preserving partial-byte alignment.
      fn write_film_grain_disabled_bit(&mut self, extra_byte: u8, extra_bits_used: usize) {
 +        self.write_film_grain_disabled_bit_with_trailing(extra_byte, extra_bits_used, false);
@@ -154,13 +190,13 @@ diff --git a/src/parser/frame.rs b/src/parser/frame.rs
 +        write_trailing_bits: bool,
 +    ) {
          let mut data = bitvec::bitvec![u8, Msb0;];
-
+ 
          for i in 0..extra_bits_used {
              data.push(extra_byte.bit(7 - i));
          }
          // Set "apply_grain" to false.
          data.push(false);
-
+ 
 +        if write_trailing_bits {
 +            data.push(true);
 +            while data.len() % 8 != 0 {
