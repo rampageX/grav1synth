@@ -2,7 +2,7 @@ diff --git a/src/parser/obu.rs b/src/parser/obu.rs
 --- a/src/parser/obu.rs
 +++ b/src/parser/obu.rs
 @@ -210,11 +210,35 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
- 
+
                  Ok((input, header.map(Obu::FrameHeader)))
              }
              ObuType::TileGroup => {
@@ -41,19 +41,132 @@ diff --git a/src/parser/obu.rs b/src/parser/obu.rs
                  trace_section("Temporal Delimiter");
                  debug!("Skipping temporal delimiter");
 @@ -1138,14 +1162,13 @@ mod tests {
- 
+
      // ===== Group 8: parse_obu — TileGroup panic + error conditions =====
- 
+
      #[test]
 -    #[should_panic(expected = "This should only be called from within a frame OBU")]
 -    fn parse_obu_tile_group_panics() {
 +    fn parse_obu_tile_group_without_frame_header_returns_error() {
          let obu = build_obu_bytes(ObuType::TileGroup, None, true, &[0x00]);
          let mut parser = make_parser::<false>(0, false, None, Vec::new());
- 
+
 -        let _ = parser.parse_obu(&obu, 0);
 +        assert!(parser.parse_obu(&obu, 0).is_err());
      }
- 
+
      #[test]
      fn parse_obu_rejects_empty_input() {
+diff --git a/src/parser/frame.rs b/src/parser/frame.rs
+--- a/src/parser/frame.rs
++++ b/src/parser/frame.rs
+@@ -634,23 +634,33 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
+-                        self.write_film_grain_bits(
++                        self.write_film_grain_bits_with_trailing(
+                             extra_byte,
+                             extra_bits_used,
+                             &new_header,
+                             frame_type,
++                            !verify_byte_alignment,
+                         )
+                     } else {
+                         // Sets "apply_grain" to false. We don't need to do anything else.
+-                        self.write_film_grain_disabled_bit(extra_byte, extra_bits_used);
++                        self.write_film_grain_disabled_bit_with_trailing(
++                            extra_byte,
++                            extra_bits_used,
++                            !verify_byte_alignment,
++                        );
+                         FilmGrainHeader::Disable
+                     }
+                 } else {
+                     // There won't be any bits remaining, and we don't need to append any bits,
+                     // so we have to handle this separately.
+                     if input.1 > 0 {
+                         let mut extra_byte = orig_input[len];
+                         let start_bit = 7 - input.1;
+                         for i in 0..=start_bit {
+                             extra_byte.set_bit(i, false);
+                         }
++                        if !verify_byte_alignment {
++                            extra_byte.set_bit(start_bit, true);
++                        }
+                         self.packet_out.push(extra_byte);
++                    } else if !verify_byte_alignment {
++                        self.packet_out.push(0x80);
+                     }
+                     FilmGrainHeader::Disable
+@@ -705,10 +715,27 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
+     fn write_film_grain_bits(
+         &mut self,
+         extra_byte: u8,
+         extra_bits_used: usize,
+         new_header: &GrainTableSegment,
+         frame_type: FrameType,
+     ) -> FilmGrainHeader {
++        self.write_film_grain_bits_with_trailing(
++            extra_byte,
++            extra_bits_used,
++            new_header,
++            frame_type,
++            false,
++        )
++    }
++
++    fn write_film_grain_bits_with_trailing(
++        &mut self,
++        extra_byte: u8,
++        extra_bits_used: usize,
++        new_header: &GrainTableSegment,
++        frame_type: FrameType,
++        write_trailing_bits: bool,
++    ) -> FilmGrainHeader {
+         let params = &new_header.grain_params;
+         let mut data = bitvec::bitvec![u8, Msb0;];
+
+@@ -810,7 +837,16 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
+         // overlap flag (1 bit)
+         data.push(params.overlap_flag);
+         // clip_to_restricted_range flag (1 bit)
+         data.push(params.clip_to_restricted_range);
+
++        if write_trailing_bits {
++            // Standalone OBU_FRAME_HEADER ends with trailing_bits():
++            // one trailing_one_bit followed by zero padding to byte alignment.
++            data.push(true);
++            while data.len() % 8 != 0 {
++                data.push(false);
++            }
++        }
++
+         self.packet_out.extend_from_slice(data.as_raw_slice());
+         trace!(
+@@ -824,12 +860,28 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
+     /// Writes an `apply_grain = 0` bit while preserving partial-byte alignment.
+     fn write_film_grain_disabled_bit(&mut self, extra_byte: u8, extra_bits_used: usize) {
++        self.write_film_grain_disabled_bit_with_trailing(extra_byte, extra_bits_used, false);
++    }
++
++    fn write_film_grain_disabled_bit_with_trailing(
++        &mut self,
++        extra_byte: u8,
++        extra_bits_used: usize,
++        write_trailing_bits: bool,
++    ) {
+         let mut data = bitvec::bitvec![u8, Msb0;];
+
+         for i in 0..extra_bits_used {
+             data.push(extra_byte.bit(7 - i));
+         }
+         // Set "apply_grain" to false.
+         data.push(false);
+
++        if write_trailing_bits {
++            data.push(true);
++            while data.len() % 8 != 0 {
++                data.push(false);
++            }
++        }
++
+         self.packet_out.extend_from_slice(data.as_raw_slice());
+     }
