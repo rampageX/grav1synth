@@ -8,9 +8,13 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: formalize-v0.2.2
+  cancel-in-progress: true
+
 jobs:
   formalize:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     if: ${{ github.actor != 'github-actions[bot]' }}
     steps:
       - uses: actions/checkout@v4
