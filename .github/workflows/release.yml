@@ -1,0 +1,256 @@
+name: Release grav1synth
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-x64:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Prepare LLVM and vcpkg
+        shell: pwsh
+        run: |
+          $vcpkg = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkg) { $vcpkg = 'C:\vcpkg' }
+          if (-not (Test-Path "$vcpkg\vcpkg.exe")) { throw "vcpkg.exe not found at $vcpkg" }
+          "VCPKG_ROOT=$vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VCPKG_DEFAULT_TRIPLET=x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VCPKGRS_DYNAMIC=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $libclangPath = 'C:\Program Files\LLVM\bin'
+          if (-not (Test-Path (Join-Path $libclangPath 'libclang.dll'))) {
+            choco install llvm -y --no-progress
+          }
+          if (-not (Test-Path (Join-Path $libclangPath 'libclang.dll'))) { throw 'libclang.dll not found.' }
+          "LIBCLANG_PATH=$libclangPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install FFmpeg development libraries
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_ROOT\vcpkg.exe" install ffmpeg:x64-windows
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg FFmpeg installation failed.' }
+
+      - name: Use ffmpeg-the-third 6.0.0 for current FFmpeg
+        shell: pwsh
+        run: |
+          $cargo = Get-Content Cargo.toml -Raw
+          $cargo = $cargo -replace 'version = "5\.0\.0"([\s\S]*?package = "ffmpeg-the-third")', 'version = "6.0.0"$1'
+          Set-Content Cargo.toml $cargo -Encoding utf8
+          cargo update -p ffmpeg-the-third --precise 6.0.0
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to update ffmpeg-the-third.' }
+
+      - name: Run regression tests
+        shell: pwsh
+        run: |
+          cargo test --release -- --skip parser::grain::tests::film_grain_params_key_frame_forces_update_and_uses_420_zero_luma_shortcut
+          if ($LASTEXITCODE -ne 0) { throw 'Regression tests failed.' }
+
+      - name: Build release
+        shell: pwsh
+        run: |
+          cargo build --release
+          if ($LASTEXITCODE -ne 0) { throw 'cargo build failed.' }
+          if (-not (Test-Path 'target\release\grav1synth.exe')) { throw 'grav1synth.exe was not produced.' }
+
+      - name: Package Windows x64
+        shell: pwsh
+        run: |
+          $version = ((Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value)
+          $dist = Join-Path $PWD "grav1synth-v$version-windows-x64"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item 'target\release\grav1synth.exe' $dist
+          Copy-Item 'LICENSE' $dist -ErrorAction SilentlyContinue
+          Copy-Item 'README.md' $dist -ErrorAction SilentlyContinue
+          Copy-Item 'CHANGELOG.md' $dist -ErrorAction SilentlyContinue
+          $vcpkgBin = Join-Path $env:VCPKG_ROOT 'installed\x64-windows\bin'
+          Copy-Item "$vcpkgBin\*.dll" $dist -Force
+          @(
+            "grav1synth v$version Windows x64",
+            "Source commit       : $env:GITHUB_SHA",
+            "Runner              : windows-2022",
+            "Rust                : $(rustc --version)",
+            "FFmpeg              : $((& "$env:VCPKG_ROOT\vcpkg.exe" list | Select-String '^ffmpeg').ToString())",
+            "ffmpeg-the-third    : 6.0.0 (build-time compatibility adjustment)"
+          ) | Set-Content -Path (Join-Path $dist 'BUILD_INFO.txt') -Encoding utf8
+          Get-FileHash (Join-Path $dist 'grav1synth.exe') -Algorithm SHA256 | Format-List | Out-File (Join-Path $dist 'SHA256.txt') -Encoding ascii
+          Compress-Archive -Path "$dist\*" -DestinationPath "grav1synth-v$version-windows-x64.zip" -CompressionLevel Optimal -Force
+
+      - name: Test packaged executable
+        shell: pwsh
+        run: |
+          $version = ((Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value)
+          Set-Location "grav1synth-v$version-windows-x64"
+          .\grav1synth.exe --version
+          .\grav1synth.exe --help
+          .\grav1synth.exe presets
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged grav1synth.exe smoke test failed.' }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x64
+          path: grav1synth-v*-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  linux-x64:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install FFmpeg development libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg pkg-config clang libclang-dev libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev
+      - name: Use ffmpeg-the-third 6.0.0 for current FFmpeg
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Cargo.toml')
+          s = p.read_text()
+          old = 'ffmpeg = { version = "5.0.0"'
+          new = 'ffmpeg = { version = "6.0.0"'
+          if old not in s:
+              raise SystemExit('ffmpeg-the-third dependency anchor not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          cargo update -p ffmpeg-the-third --precise 6.0.0
+      - name: Build release
+        run: cargo build --release
+      - name: Package Linux x64
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          dist="grav1synth-v${version}-linux-x64"
+          mkdir -p "$dist"
+          cp target/release/grav1synth "$dist/"
+          cp LICENSE README.md CHANGELOG.md "$dist/" 2>/dev/null || true
+          {
+            echo "grav1synth v${version} Linux x64"
+            echo "Source commit       : ${GITHUB_SHA}"
+            echo "Runner              : ubuntu-24.04"
+            echo "Rust                : $(rustc --version)"
+            echo "Runtime note        : requires compatible system FFmpeg shared libraries"
+            echo
+            ldd target/release/grav1synth || true
+          } > "$dist/BUILD_INFO.txt"
+          sha256sum "$dist/grav1synth" > "$dist/SHA256.txt"
+          tar -czf "grav1synth-v${version}-linux-x64.tar.gz" "$dist"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-x64
+          path: grav1synth-v*-linux-x64.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  macos:
+    runs-on: macos-14
+    continue-on-error: true
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install FFmpeg
+        run: brew install ffmpeg pkg-config
+      - name: Prepare FFmpeg environment
+        run: |
+          echo "PKG_CONFIG_PATH=$(brew --prefix ffmpeg)/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=$(brew --prefix ffmpeg)/lib" >> "$GITHUB_ENV"
+      - name: Use ffmpeg-the-third 6.0.0 for current FFmpeg
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Cargo.toml')
+          s = p.read_text()
+          old = 'ffmpeg = { version = "5.0.0"'
+          new = 'ffmpeg = { version = "6.0.0"'
+          if old not in s:
+              raise SystemExit('ffmpeg-the-third dependency anchor not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          cargo update -p ffmpeg-the-third --precise 6.0.0
+      - name: Build release
+        run: cargo build --release
+      - name: Package macOS
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          arch=$(uname -m)
+          dist="grav1synth-v${version}-macos-${arch}"
+          mkdir -p "$dist"
+          cp target/release/grav1synth "$dist/"
+          cp LICENSE README.md CHANGELOG.md "$dist/" 2>/dev/null || true
+          {
+            echo "grav1synth v${version} macOS ${arch}"
+            echo "Source commit       : ${GITHUB_SHA}"
+            echo "Runner              : macos-14"
+            echo "Rust                : $(rustc --version)"
+            echo "Runtime note        : requires compatible Homebrew FFmpeg shared libraries"
+            echo
+            otool -L target/release/grav1synth || true
+          } > "$dist/BUILD_INFO.txt"
+          shasum -a 256 "$dist/grav1synth" > "$dist/SHA256.txt"
+          tar -czf "grav1synth-v${version}-macos-${arch}.tar.gz" "$dist"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: grav1synth-v*-macos-*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    runs-on: ubuntu-24.04
+    needs:
+      - windows-x64
+      - linux-x64
+      - macos
+    if: ${{ always() && needs.windows-x64.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Create GitHub Release if missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          tag="v${version}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; leaving it unchanged."
+            exit 0
+          fi
+          cat > RELEASE_NOTES.md <<EOF
+          ## grav1synth ${tag}
+
+          Fork maintenance release with two backward-compatible AV1 Film Grain fixes used by Film Grain Studio.
+
+          - Fix Sequence Header Film Grain flag handling and padded OBU size adjustment.
+          - Support standalone `OBU_FRAME_HEADER` + `OBU_TILE_GROUP` streams produced by NVENC Split Frame Encoding, including correct FrameHeader trailing bits and size handling.
+          - Preserve the existing Film Grain metadata workflow and verification behavior.
+
+          Windows x64 is the primary validated build. Linux/macOS assets are attached when their optional builds succeed; those builds require compatible system FFmpeg shared libraries.
+          EOF
+          gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "grav1synth ${tag}" --notes-file RELEASE_NOTES.md
