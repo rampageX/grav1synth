@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - fix/sequence-header-film-grain-padding
+      - fix/nvenc-sfe-tile-group
 
 permissions:
   contents: read
@@ -20,12 +21,27 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Apply NVENC SFE standalone TileGroup test patch
+        if: github.ref_name == 'fix/nvenc-sfe-tile-group'
+        shell: pwsh
+        run: |
+          git apply --check .github/patches/nvenc-sfe-tile-group.patch
+          if ($LASTEXITCODE -ne 0) {
+            throw "NVENC SFE TileGroup patch check failed."
+          }
+
+          git apply .github/patches/nvenc-sfe-tile-group.patch
+          if ($LASTEXITCODE -ne 0) {
+            throw "NVENC SFE TileGroup patch apply failed."
+          }
+
       - name: Show source revision
         shell: pwsh
         run: |
           git rev-parse HEAD
           git log -1 --oneline
           git status --short
+          git diff -- src/parser/obu.rs
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -143,7 +159,7 @@ jobs:
             "Rust                : $(rustc --version)"
             "FFmpeg              : $ffmpegPkg"
             "ffmpeg-the-third    : 6.0.0 (build-time compatibility patch)"
-            "Source fix          : sequence-header Film Grain flag + padded OBU size"
+            "Source fix          : sequence-header Film Grain flag + padded OBU size + standalone TileGroup OBU"
           )
 
           $buildInfo | Set-Content -Path (Join-Path $dist "BUILD_INFO.txt") -Encoding utf8
@@ -176,7 +192,7 @@ jobs:
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: grav1synth-windows-x64-sequence-fix
+          name: grav1synth-windows-x64-nvenc-sfe-tilegroup-test
           path: grav1synth-windows-x64-patched.zip
           if-no-files-found: error
           compression-level: 0
