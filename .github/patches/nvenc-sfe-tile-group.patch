@@ -1,7 +1,7 @@
 diff --git a/src/parser/obu.rs b/src/parser/obu.rs
 --- a/src/parser/obu.rs
 +++ b/src/parser/obu.rs
-@@ -210,10 +210,30 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
+@@ -210,11 +210,35 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
  
                  Ok((input, header.map(Obu::FrameHeader)))
              }
@@ -40,7 +40,7 @@ diff --git a/src/parser/obu.rs b/src/parser/obu.rs
              ObuType::TemporalDelimiter => {
                  trace_section("Temporal Delimiter");
                  debug!("Skipping temporal delimiter");
-@@ -1138,13 +1158,12 @@ mod tests {
+@@ -1138,14 +1162,13 @@ mod tests {
  
      // ===== Group 8: parse_obu — TileGroup panic + error conditions =====
  
