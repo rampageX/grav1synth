@@ -1,6 +1,12 @@
 ## Unreleased
 
+## Version 0.2.3
+
 - Fix AV1 Film Grain apply: avoid restricted-range clipping for full-range streams (rust-av/grav1synth#47).
+- Preserve Film Grain metadata and the original pixel signal when processing full-range AV1 video; validated with full-range testcard.
+
+## Version 0.2.2
+
 - Merge `apply` and `generate` into a single `apply` command. `--grain <FILE>` applies
   table-based grain; `--iso <NUM>` (with optional `--chroma`) applies photon-noise-based grain.
 - `apply` now checks for existing grain headers before writing. If grain is already present it

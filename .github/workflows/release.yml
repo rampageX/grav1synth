@@ -245,12 +245,15 @@ jobs:
           cat > RELEASE_NOTES.md <<EOF
           ## grav1synth ${tag}
 
-          Fork maintenance release with two backward-compatible AV1 Film Grain fixes used by Film Grain Studio.
+          Full-range AV1 Film Grain clipping fix for Film Grain Studio (rust-av/grav1synth#47).
 
-          - Fix Sequence Header Film Grain flag handling and padded OBU size adjustment.
-          - Support standalone `OBU_FRAME_HEADER` + `OBU_TILE_GROUP` streams produced by NVENC Split Frame Encoding, including correct FrameHeader trailing bits and size handling.
-          - Preserve the existing Film Grain metadata workflow and verification behavior.
+          - Apply restricted-range clipping only when the AV1 sequence header declares limited range.
+          - Preserve full-range (0-255) dark and bright levels when adding Film Grain metadata.
+          - Preserve existing NVENC Split Frame Encoding and OBU Frame Header / Tile Group compatibility fixes.
+          - Test results: full-range AV1 bitstream flags and decoded grayscale values verified against v0.2.2.
 
-          Windows x64 is the primary validated build. Linux/macOS assets are attached when their optional builds succeed; those builds require compatible system FFmpeg shared libraries.
+          Windows x64 is the primary build, compiled and regression-tested on windows-2022.
+          Linux/macOS assets are optional and require compatible system FFmpeg shared libraries.
+          Film Grain Studio dependency update will be handled separately.
           EOF
           gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "grav1synth ${tag}" --notes-file RELEASE_NOTES.md
