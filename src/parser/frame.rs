@@ -14,9 +14,9 @@ use num_traits::{PrimInt, clamp};
 
 use super::{
     BitstreamParser,
-    grain::{FilmGrainHeader, film_grain_params},
+    grain::{FilmGrainHeader, FilmGrainParams, film_grain_params},
     obu::ObuHeader,
-    sequence::{SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS},
+    sequence::{ColorRange, SELECT_INTEGER_MV, SELECT_SCREEN_CONTENT_TOOLS},
     trace::{
         TraceCtx, trace_bool, trace_byte_alignment, trace_field, trace_field_signed, trace_su,
         trace_take_u8, trace_take_u32, trace_take_u64, trace_take_usize,
@@ -836,8 +836,11 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
         }
         // overlap flag (1 bit)
         data.push(params.overlap_flag);
-        // clip_to_restricted_range flag (1 bit)
-        data.push(params.clip_to_restricted_range);
+        // Grain tables default to restricted-range clipping. Preserve it only for
+        // limited-range streams so full-range shadows and highlights are not clamped.
+        let clip_to_restricted_range =
+            params.clip_to_restricted_range && color_config.color_range == ColorRange::Limited;
+        data.push(clip_to_restricted_range);
 
         if write_trailing_bits {
             // Standalone OBU_FRAME_HEADER ends with trailing_bits():
@@ -854,7 +857,10 @@ impl<const WRITE: bool> BitstreamParser<WRITE> {
             to_binary_string(data.as_raw_slice())
         );
 
-        FilmGrainHeader::UpdateGrain(params.clone())
+        FilmGrainHeader::UpdateGrain(FilmGrainParams {
+            clip_to_restricted_range,
+            ..params.clone()
+        })
     }
 
     /// Writes an `apply_grain = 0` bit while preserving partial-byte alignment.
@@ -4229,6 +4235,55 @@ mod tests {
         } else {
             panic!("expected UpdateGrain, got {parsed:?}");
         }
+    }
+
+    /// The encoded bit and returned parser state must agree with AV1 color_range.
+    fn written_clip_flag(range: ColorRange) -> (bool, bool) {
+        let mut parser = make_parser::<true>();
+        let mut sequence_header = minimal_sequence_header();
+        sequence_header.color_config.color_range = range;
+        parser.sequence_header = Some(sequence_header);
+        let mut params = minimal_grain_params();
+        params.clip_to_restricted_range = true;
+        let segment = GrainTableSegment {
+            start_time: 0,
+            end_time: 0,
+            grain_params: params,
+        };
+        let FilmGrainHeader::UpdateGrain(returned) =
+            parser.write_film_grain_bits(0, 0, &segment, FrameType::Key)
+        else {
+            panic!("expected UpdateGrain");
+        };
+
+        let data = &parser.packet_out;
+        let grain_input: BitInput = (data.as_slice(), 0);
+        let (_, parsed) = film_grain_params(
+            grain_input,
+            grain_test_ctx(grain_input),
+            true,
+            FrameType::Key,
+            true,
+            (0, 0),
+        )
+        .unwrap();
+        let FilmGrainHeader::UpdateGrain(written) = parsed else {
+            panic!("expected UpdateGrain, got {parsed:?}");
+        };
+        (
+            written.clip_to_restricted_range,
+            returned.clip_to_restricted_range,
+        )
+    }
+
+    #[test]
+    fn write_grain_clips_to_restricted_range_in_a_limited_range_stream() {
+        assert_eq!(written_clip_flag(ColorRange::Limited), (true, true));
+    }
+
+    #[test]
+    fn write_grain_does_not_clip_a_full_range_stream() {
+        assert_eq!(written_clip_flag(ColorRange::Full), (false, false));
     }
 
     #[test]
